@@ -3643,15 +3643,19 @@ public:
       // Double slashes (//) should not be a problem.
       std::string new_path = prefixes[i] + '/' + path;
       _file.reset(new std::ifstream(new_path.c_str()));
+      _filepath = new_path;
       if (is_open())
         break;
     }
     // 2. If no valid file found then fallback to opening the path as-is.
     if (!_file || !is_open()) {
       _file.reset(new std::ifstream(path.c_str()));
+      _filepath = path;
     }
   }
   bool is_open() const { return _file->is_open(); }
+
+  const std::string& get_filepath() const { return _filepath; }
 
   lines_t &get_lines(unsigned line_start, unsigned line_count, lines_t &lines) {
     using namespace std;
@@ -3722,10 +3726,13 @@ public:
     }
   };
 
-  void swap(SourceFile &b) { _file.swap(b._file); }
+  void swap(SourceFile &b) {
+    _file.swap(b._file);
+    _filepath.swap(b._filepath);
+  }
 
 #ifdef BACKWARD_ATLEAST_CXX11
-  SourceFile(SourceFile &&from) : _file(nullptr) { swap(from); }
+  SourceFile(SourceFile &&from) : _file(nullptr), _filepath{} { swap(from); }
   SourceFile &operator=(SourceFile &&from) {
     swap(from);
     return *this;
@@ -3745,6 +3752,7 @@ public:
 private:
   details::handle<std::ifstream *, details::default_delete<std::ifstream *>>
       _file;
+  std::string _filepath;
 
   std::vector<std::string> get_paths_from_env_variable_impl() {
     std::vector<std::string> paths;
@@ -3808,10 +3816,6 @@ public:
     return lines;
   }
 
-private:
-  typedef details::hashtable<std::string, SourceFile>::type src_files_t;
-  src_files_t _src_files;
-
   SourceFile &get_src_file(const std::string &filename) {
     src_files_t::iterator it = _src_files.find(filename);
     if (it != _src_files.end()) {
@@ -3821,6 +3825,10 @@ private:
     new_src_file = SourceFile(filename);
     return new_src_file;
   }
+
+private:
+  typedef details::hashtable<std::string, SourceFile>::type src_files_t;
+  src_files_t _src_files;
 };
 
 /*************** PRINTER ***************/
@@ -3919,16 +3927,24 @@ public:
 
 class Printer {
 public:
+  typedef bool(*SkipFrameCallback)(const std::string&);
+
   bool snippet;
   ColorMode::type color_mode;
   bool address;
   bool object;
   int inliner_context_size;
   int trace_context_size;
+  SkipFrameCallback skip_frame_callback;
 
   Printer()
       : snippet(true), color_mode(ColorMode::automatic), address(false),
-        object(false), inliner_context_size(5), trace_context_size(7) {}
+        object(false), inliner_context_size(5), trace_context_size(7),
+        skip_frame_callback(NULL) {}
+
+  void set_skip_frame_callback(SkipFrameCallback callback) {
+    skip_frame_callback = callback;
+  }
 
   template <typename ST> FILE *print(ST &st, FILE *fp = stderr) {
     cfile_streambuf obuf(fp);
@@ -3999,6 +4015,16 @@ private:
 
   void print_trace(std::ostream &os, const ResolvedTrace &trace,
                    Colorize &colorize) {
+    if (skip_frame_callback) {
+      if (trace.source.filename.size()) {
+        const SourceFile& source_file = _snippets.get_src_file( trace.source.filename );
+        bool skip_this_frame = skip_frame_callback(source_file.get_filepath());
+        if (skip_this_frame) {
+          return;
+        }
+      }
+    }
+
     os << "#" << std::left << std::setw(2) << trace.idx << std::right;
     bool already_indented = true;
 
